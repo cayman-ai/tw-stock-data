@@ -1,0 +1,6 @@
+查詢 [(2026, 3), (2025, 4), (2023, 4), (2021, 4)] → 涵蓋 [(2026, 3), (2025, 4), (2025, 3), (2024, 4), (2023, 4), (2022, 4), (2021, 4), (2020, 4)]；待抓 5 家（已完成 0 家）
+  ! 第 1 次失敗（('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))），10 秒後重試
+  ! 第 2 次失敗（('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))），20 秒後重試
+  ! 第 1 次失敗（HTTPSConnectionPool(host='mopsov.twse.com.tw', port=443): Max retries exceeded with url: /mops/web/ajax_t164sb05 (Caused by NewConnectionError("HTTPSConnection(host='mopsov.twse.com.tw', port=443): Failed to establish a new connection: [Errno 111] Connection refused"))），10 秒後重試
+  ! 第 1 次失敗（HTTPSConnectionPool(host='mopsov.twse.com.tw', port=443): Max retries exceeded with url: /mops/web/ajax_t164sb05 (Caused by NewConnectionError("HTTPSConnection(host='mopsov.twse.com.tw', port=443): Failed to establish a new connection: [Errno 111] Connection refused"))），10 秒後重試
+本次完成 5 家，剩 0 家
