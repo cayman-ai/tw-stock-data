@@ -18,9 +18,17 @@ jobs:
       - run: pip install -q requests pandas lxml
       - name: 執行
         run: mkdir -p out && ${{ inputs.cmd }} 2>&1 | tee out/log.txt
+      - name: 資料存回 main
+        if: always()
+        run: |
+          git add data/ || true
+          if ! git diff --cached --quiet; then
+            git -c user.name=tw-stock-data-bot -c user.email=bot@users.noreply.github.com commit -qm "資料更新：${{ inputs.cmd }}"
+            for i in 1 2 3 4 5; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep $((i*5)); done
+          fi
       - name: 結果推到 scratch 分支
         if: always()
         run: |
-          cd out && git init -q && git checkout -q -b scratch && git add -A
+          cd out && rm -rf .git && git init -q && git checkout -q -b scratch && git add -A
           git -c user.name=bot -c user.email=bot@users.noreply.github.com commit -qm "run ${{ github.run_id }}"
-          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" scratch
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:scratch-${{ github.run_id }} && git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:scratch || true
