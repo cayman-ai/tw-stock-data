@@ -134,6 +134,18 @@ def main():
     mr = pd.read_csv(HISTORY / "monthly_revenue.csv", dtype={"code": str})
     dv = pd.read_csv(HISTORY / "dividends.csv", dtype={"code": str})
     px = pd.read_csv(LATEST / "prices.csv", dtype={"code": str})
+    cap_path = ROOT / "data" / "parts" / "capex" / "capex.csv"
+    capex = {}
+    if cap_path.exists():   # 資本支出（年初至季末累計，千元，正數）
+        for x in pd.read_csv(cap_path, dtype={"code": str}).itertuples(index=False):
+            if ok(x.capex_cum):
+                capex[(x.code, int(x.year), int(x.quarter))] = float(x.capex_cum)
+    # 全年營業／投資現金流：直接用第 4 季累計數（＝年報全年），不必四季單季都齊
+    annual_cf = {}
+    for f in (ROOT / "data" / "parts" / "cf").glob("*Q4.csv"):
+        for x in pd.read_csv(f, dtype={"code": str}).itertuples(index=False):
+            annual_cf[(x.code, int(x.year))] = (x.operating_cash_flow if ok(x.operating_cash_flow) else None,
+                                               x.investing_cash_flow if ok(x.investing_cash_flow) else None)
     Y = int(mr["year"].max())
     latest_month = int(mr[mr["year"] == Y]["month"].max())
     gq = q.dropna(subset=["eps"]).sort_values(["year", "quarter"]).iloc[-1]
@@ -235,14 +247,30 @@ def main():
         fcf4 = ocf4 + icf4 if ocf4 is not None and icf4 is not None else None
         pos, known = 0, 0
         for yy in range(Y - 1, Y - 6, -1):
-            ks = [(yy, k) for k in range(1, 5)]
-            o, i = total(qd, ks, "operating_cash_flow"), total(qd, ks, "investing_cash_flow")
+            o, i = annual_cf.get((code, yy), (None, None))
             if o is not None and i is not None:
                 known += 1
                 pos += (o + i) > 0
         fps = div(fcf4, shares)
-        # 規格的自由現金流（營業現金流−資本支出）尚無資本支出資料，留 null；近似值另放 fcf_approx，不冒充
-        rec["fcf"] = {"per_share_ttm": None, "yield": None, "positive_years_5y": None, "note": "尚無資本支出資料"}
+        # 自由現金流＝營業現金流−資本支出（資本支出來自逐家現金流量表；年初至季末累計換算成近四季／全年）
+        ly_, lq_ = lq
+        if lq_ == 4:
+            capex4 = capex.get((code, ly_, 4))
+        else:
+            a1, a2, a3 = capex.get((code, ly_, lq_)), capex.get((code, ly_ - 1, 4)), capex.get((code, ly_ - 1, lq_))
+            capex4 = a1 + a2 - a3 if None not in (a1, a2, a3) else None
+        fcf_true = ocf4 - capex4 if ocf4 is not None and capex4 is not None else None
+        fps_true = div(fcf_true, shares)
+        tpos, tknown = 0, 0
+        for yy in range(Y - 1, Y - 6, -1):
+            o = annual_cf.get((code, yy), (None, None))[0]
+            cx = capex.get((code, yy, 4))
+            if o is not None and cx is not None:
+                tknown += 1
+                tpos += (o - cx) > 0
+        rec["fcf"] = {"per_share_ttm": r(fps_true, 2), "yield": r(div(fps_true, price)), "capex_ttm": r(capex4, 0),
+                      "positive_years_5y": tpos if tknown == 5 else None, "known_years": tknown,
+                      "note": None if fcf_true is not None else "資本支出資料尚未抓到"}
         rec["fcf_approx"] = {"basis": "營業現金流＋投資現金流（近似，含金融資產買賣）", "per_share_ttm": r(fps, 2),
                              "yield": r(div(fps, price)), "positive_years_5y": pos if known == 5 else None, "known_years": known}
         gp4, op4, nit4 = total(qd, last4, "gross_profit"), total(qd, last4, "operating_income"), total(qd, last4, "net_income")
@@ -279,7 +307,7 @@ def main():
            "sources_date": {"monthly_revenue": f"{Y}-{latest_month:02d}", "quarterly": f"{int(gq['year'])}Q{int(gq['quarter'])}",
                             "price": str(px["date"].max())},
            "method": "今年預估 EPS＝已公布季 EPS＋剩餘營收×近四季淨利率÷股數；全年營收用旺淡季係數推估並換算到財報口徑；"
-                     "自由現金流為近似值（營業現金流＋投資現金流）；缺資料為 null",
+                     "自由現金流＝營業現金流−資本支出（fcf_approx 為營業＋投資現金流近似值）；缺資料為 null",
            "stocks": out}
     (SITE / "stocks.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":"),
                                                  default=lambda o: o.item() if hasattr(o, "item") else str(o)), encoding="utf-8")

@@ -1,0 +1,47 @@
+name: 每日更新
+on:
+  schedule:
+    - cron: "31 10 * * 1-5"     # 台北時間週一～五 18:31（收盤後、本益比資料公布後）
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tw-stock-data-write
+  cancel-in-progress: false
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -q requests pandas lxml
+      - name: 抓最新資料並重算（任一步失敗就停，不提交）
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/fetch.py companies
+          python scripts/fetch.py prices
+          python scripts/fetch.py revenue --months 64 --refresh 2
+          python scripts/fetch.py is --quarters 21 --refresh 1
+          python scripts/fetch.py bs --quarters 21 --refresh 1
+          python scripts/fetch.py cf --quarters 21 --refresh 1
+          python scripts/fetch.py dividends --years 7 --refresh 1
+          python scripts/build_history.py
+          python scripts/build_site.py
+      - name: 資料存回 main
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add data/ reports/conflicts.csv
+          if ! git diff --cached --quiet; then
+            git -c user.name=tw-stock-data-bot -c user.email=bot@users.noreply.github.com commit -qm "每日更新 $(TZ=Asia/Taipei date +%F)"
+            pushed=0
+            for i in 1 2 3 4 5; do
+              if git pull -q --rebase --autostash origin main && git push -q origin HEAD:main; then pushed=1; break; fi
+              sleep $((i*7))
+            done
+            if [ "$pushed" != 1 ]; then echo "::error::推送失敗"; exit 1; fi
+          fi
