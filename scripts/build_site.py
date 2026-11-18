@@ -2,7 +2,7 @@
 
 原則：缺資料就輸出 null 並寫明原因，不用 0 補。
 
-主算法：今年預估 EPS ＝ 已公布季 EPS ＋ 剩餘營收 × 近四季淨利率 ÷ 股數
+主算法：今年預估 EPS ＝ 已公布季 EPS ＋ 剩餘營收 × 近四季淨利率（業外調整）÷ 股數
   全年營收（月營收口徑）＝ 今年已公布月營收累計 × 旺淡季係數（前 2～4 個完整年度「全年 ÷ 同期累計」中位數）
   月營收與財報營收口徑不同的公司（例如財報採淨額認列），用「已公布季度的財報營收 ÷ 同期月營收」換算到財報口徑。
 """
@@ -23,7 +23,7 @@ from twdata.common import HISTORY, LATEST, ROOT  # noqa: E402
 EXCLUDED_INDUSTRY = {"14", "17"}          # 建材營造業、金融保險業
 # 預估區間寬度：全市場回測（reports/backtest.md）主算法的誤差中位數，依營收規模與已公布月營收月數
 # 1～3 月（只有少數月份）用 5 月底的誤差再放寬 1.3 倍
-RANGE = {"大型": (0.20, 0.11, 0.06), "中型": (0.24, 0.15, 0.08), "小型": (0.31, 0.22, 0.13)}
+RANGE = {"大型": (0.19, 0.11, 0.06), "中型": (0.23, 0.14, 0.08), "小型": (0.33, 0.21, 0.12)}
 
 
 def range_pct(tier: str, months: int):
@@ -109,6 +109,16 @@ def forecast_eps(qd: dict, m: dict, Y: int, shares: float, latest_q: tuple):
     margin = div(ni4, rev4)
     if margin is None:
         return None, "近四季營收或母公司淨利缺漏"
+    # 業外調整（2026-11-18 全市場回測勝出）：近四季業外損益換成「近八季單季中位數 × 4」，
+    # 扣掉一次性業外收益／損失（例如處分資產）後再算淨利率，避免把一次性項目外推到未來季度
+    margin_raw, nonop_adj = margin, False
+    non8 = [qd[k]["non_operating"] for k in q_back(*latest_q, 8) if ok(qd.get(k, {}).get("non_operating"))]
+    non4, pt4, tx4, n4 = (total(qd, last4, f) for f in ("non_operating", "pretax_income", "income_tax", "net_income"))
+    if len(non8) >= 6 and None not in (non4, pt4, n4) and n4 != 0:
+        taxr = min(max((tx4 or 0) / pt4, 0), .5) if pt4 > 0 else .2
+        share = min(max(ni4 / n4, 0), 1) if n4 > 0 else 1
+        margin = (ni4 - (non4 - 4 * st.median(non8)) * (1 - taxr) * share) / rev4
+        nonop_adj = True
     # 月營收 → 財報口徑換算比例
     if nq > 0:
         ratio = div(sum(qd[(Y, q)]["revenue"] for q in pub_q), sum(m[(Y, k)] for k in range(1, 3 * nq + 1)))
@@ -138,7 +148,7 @@ def forecast_eps(qd: dict, m: dict, Y: int, shares: float, latest_q: tuple):
         est.append({"q": q, "eps": r(e, 2), "actual_months": sum(1 for k in months if k <= nm)})
     pub = sum(qd[(Y, q)]["eps"] for q in pub_q)
     return pub + rem_eps, {"published": [{"q": q, "eps": r(qd[(Y, q)]["eps"], 2)} for q in pub_q],
-                           "estimated": est, "margin_ttm": r(margin), "seasonal_factor": r(factor) if factor else None,
+                           "estimated": est, "margin_ttm": r(margin), "margin_ttm_raw": r(margin_raw), "nonop_adjusted": nonop_adj, "seasonal_factor": r(factor) if factor else None,
                            "seasonal_years": nf, "revenue_basis_ratio": r(ratio), "months_published": nm}
 
 
@@ -203,7 +213,7 @@ def main():
             eps_f, detail = forecast_eps(qd, m, Y, shares, lq)
         ly = total(qd, [(Y - 1, k) for k in range(1, 5)], "eps")
         rec["eps"] = {"target_year": Y, "forecast": r(eps_f, 2), "last_year": r(ly, 2), "ttm": r(ttm_eps, 2),
-                      "growth": r(div(eps_f, ly) - 1) if eps_f is not None and ly and ly > 0 else None,
+                      "growth": r(div(eps_f, ly) - 1) if eps_f is not None and ly is not None and ly >= 0.5 else None,   # 去年 EPS < 0.5 元基期太低，成長率失真，不算
                       "shares_thousand": r(shares, 0), "latest_quarter": f"{lq[0]}Q{lq[1]}"}
         if isinstance(detail, dict):
             rec["eps"].update(detail)
@@ -230,7 +240,9 @@ def main():
                 hist.append({"y": yy, "eps": r(ey, 2), "cash": None, "stock": None, "status": "尚未配發或資料未到"})
             else:
                 hist.append({"y": yy, "eps": r(ey, 2), "cash": 0.0, "stock": 0.0, "status": "未配發"})
-        valid = [h for h in hist if h["eps"] is not None and h["eps"] > 0 and h["cash"] is not None]
+        # 單年配發率超過 150%（多為動用公積配發或當年獲利特別少）不列入平均，避免少數年度把平均拉爆
+        valid = [h for h in hist if h["eps"] is not None and h["eps"] > 0 and h["cash"] is not None
+                 and (h["cash"] + (h["stock"] or 0)) / h["eps"] <= 1.5]
         cr = st.mean(h["cash"] / h["eps"] for h in valid) if valid else None
         sr = st.mean(h["stock"] / h["eps"] for h in valid) if valid else None
         pos_eps = eps_f is not None and eps_f > 0
@@ -339,7 +351,7 @@ def main():
     doc = {"as_of": date.today().isoformat(), "target_year": Y,
            "sources_date": {"monthly_revenue": f"{Y}-{latest_month:02d}", "quarterly": f"{int(gq['year'])}Q{int(gq['quarter'])}",
                             "price": str(px["date"].max())},
-           "method": "今年預估 EPS＝已公布季 EPS＋剩餘營收×近四季淨利率÷股數；全年營收用旺淡季係數推估並換算到財報口徑；"
+           "method": "今年預估 EPS＝已公布季 EPS＋剩餘營收×近四季淨利率（業外以近八季中位數調整）÷股數；全年營收用旺淡季係數推估並換算到財報口徑；"
                      "自由現金流＝營業現金流−資本支出（fcf_approx 為營業＋投資現金流近似值）；缺資料為 null",
            "stocks": out}
     (SITE / "stocks.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":"),

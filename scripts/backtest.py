@@ -50,6 +50,18 @@ def run_one(qd, m, y, nq, nm):
     if not rev4:
         return None
     margin = sum(qd[k]["parent_net_income"] for k in last4) / rev4
+    # 業外調整版：近四季業外損益換成「近八季單季中位數 × 4」，扣掉一次性業外收益／損失後再算淨利率
+    margin_adj = None
+    non8 = [qd[k]["non_operating"] for k in need_q if k in qd and qd[k]["non_operating"] is not None]
+    if len(non8) >= 6 and all(qd[k]["non_operating"] is not None and qd[k]["pretax_income"] is not None and qd[k]["net_income"] for k in last4):
+        non4 = sum(qd[k]["non_operating"] for k in last4)
+        pt4 = sum(qd[k]["pretax_income"] for k in last4)
+        tx4 = sum((qd[k]["income_tax"] or 0) for k in last4)
+        n4 = sum(qd[k]["net_income"] for k in last4)
+        p4 = sum(qd[k]["parent_net_income"] for k in last4)
+        taxr = min(max(tx4 / pt4, 0), .5) if pt4 > 0 else .2
+        share = min(max(p4 / n4, 0), 1) if n4 > 0 else 1
+        margin_adj = (p4 - (non4 - 4 * st.median(non8)) * (1 - taxr) * share) / rev4
     pub = sum(qd[(y, i)]["eps"] for i in range(1, nq + 1))
     stmt = sum(qd[(y, i)]["revenue"] for i in range(1, nq + 1))
     ytd = sum(m[(y, k)] for k in range(1, nm + 1))
@@ -59,6 +71,7 @@ def run_one(qd, m, y, nq, nm):
     ratio = stmt / m_pub
     rem_main = (annual - m_pub) * ratio                           # 剩餘營收（財報口徑）
     main_ = pub + rem_main * margin / shares
+    adj = pub + rem_main * margin_adj / shares if margin_adj is not None else main_
     avg3 = sum(m[(y, k)] for k in range(nm - 2, nm + 1)) / 3
     rem_simple = sum(sum(m[(y, k)] if k <= nm else avg3 for k in range(qq * 3 - 2, qq * 3 + 1)) for qq in range(nq + 1, 5)) * ratio
     simple = pub + rem_simple * margin / shares
@@ -78,7 +91,7 @@ def run_one(qd, m, y, nq, nm):
         niy = pt - (pt * taxr if pt > 0 else 0)
         old = (niy - nci - max(0, niy - ni) * ncir) / shares
     ttm = sum(qd[k]["eps"] for k in last4)
-    return {"主算法": main_, "簡易版": simple, "舊版": old, "近四季": ttm, "rev_ttm": rev4}
+    return {"主算法": main_, "業外調整": adj, "簡易版": simple, "舊版": old, "近四季": ttm, "rev_ttm": rev4}
 
 
 def main():
@@ -109,7 +122,7 @@ def main():
     # 營收規模排名：用預估當時所有有資料的公司排（在依年末實際 EPS 篩選之前），避免用到未來資訊
     allrows["rank_pct"] = allrows.groupby(["year", "point"])["rev_ttm"].rank(ascending=False, pct=True)
     df = allrows[allrows["actual"].notna() & (allrows["actual"].abs() >= 0.5) & allrows["舊版"].notna()].copy()
-    methods = ["主算法", "簡易版", "舊版", "近四季"]
+    methods = ["主算法", "業外調整", "簡易版", "舊版", "近四季"]
     for k in methods:
         df[k + "_err"] = (df[k] - df["actual"]).abs() / df["actual"].abs()
     lines = ["# 全市場回測結果\n",
