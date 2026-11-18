@@ -5,10 +5,12 @@ on:
       cmd:
         description: 要執行的指令（在 repo 根目錄）
         required: true
+permissions:
+  contents: write
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,6 +18,9 @@ jobs:
       - run: pip install -q requests pandas lxml
       - name: 執行
         run: mkdir -p out && ${{ inputs.cmd }} 2>&1 | tee out/log.txt
-      - uses: actions/upload-artifact@v4
+      - name: 結果推到 scratch 分支
         if: always()
-        with: { name: out, path: out, retention-days: 3 }
+        run: |
+          cd out && git init -q && git checkout -q -b scratch && git add -A
+          git -c user.name=bot -c user.email=bot@users.noreply.github.com commit -qm "run ${{ github.run_id }}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" scratch
