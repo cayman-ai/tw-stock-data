@@ -22,19 +22,24 @@ _session = requests.Session()
 _session.headers.update(UA)
 
 
-def fetch(url: str, data: dict | None = None, *, retries: int = 3, timeout: int = 180) -> str:
-    """GET（data 為 None）或 POST，失敗退避重試。回傳文字。"""
+def fetch(url: str, data: dict | None = None, *, retries: int = 3, timeout: int = 180, json_body: dict | None = None,
+          raw: bool = False):
+    """GET（data 為 None）或 POST（表單 data，或 json_body），失敗退避重試。回傳文字（raw=True 回傳 bytes）。"""
     for attempt in range(1, retries + 1):
         wait = DELAY - (time.time() - _last[0])
         if wait > 0:
             time.sleep(wait)
         try:
-            if data is None:
+            if json_body is not None:
+                r = _session.post(url, json=json_body, timeout=timeout)
+            elif data is None:
                 r = _session.get(url, timeout=timeout)
             else:
                 r = _session.post(url, data=data, timeout=timeout)
             _last[0] = time.time()
             r.raise_for_status()
+            if raw:
+                return r.content
             if "html" in r.headers.get("content-type", "") and "charset" not in r.headers.get("content-type", "").lower():
                 r.encoding = r.apparent_encoding
             text = r.text
