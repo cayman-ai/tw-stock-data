@@ -43,7 +43,25 @@ def main():
     is_ = load("is")
     bs = load("bs")
     cf = load("cf")
+    # 沒有子公司的公司，財報不分「歸屬母公司」：用總淨利、總權益代替
+    is_["parent_net_income"] = is_["parent_net_income"].where(is_["parent_net_income"].notna(), is_["net_income"])
+    bs["parent_equity"] = bs["parent_equity"].where(bs["parent_equity"].notna(), bs["total_equity"])
+    # 累計基礎的隱含股數（千股）＝累計母公司淨利 ÷ 累計 EPS
+    is_ = is_.sort_values(["code", "year", "quarter"])
+    is_["_shares"] = is_["parent_net_income"] / is_["eps"].where(is_["eps"].abs() >= 0.05)
+    cum = is_.set_index(["code", "year", "quarter"])
     q = to_single(is_, FLOW_IS)
+    # 單季 EPS：同一年內股數基礎若大幅改變（拆股、面額變更），改用「單季淨利 ÷ 本期隱含股數」，不用累計相減
+    q = q.merge(is_[["code", "year", "quarter", "_shares"]], on=["code", "year", "quarter"], how="left")
+    prev = is_[["code", "year", "quarter", "_shares"]].copy()
+    prev["quarter"] += 1
+    q = q.merge(prev.rename(columns={"_shares": "_prev_shares"}), on=["code", "year", "quarter"], how="left")
+    jump = (q["quarter"] > 1) & ((q["_shares"] / q["_prev_shares"]).sub(1).abs() > 0.5)
+    q.loc[jump, "eps"] = q.loc[jump, "parent_net_income"] / q.loc[jump, "_shares"]
+    # 股數基礎調整係數：各季隱含股數 ÷ 最新一季隱含股數；只有差距超過 20%（拆股、面額變更、大幅增減資或配股）才調整，其餘為 1
+    latest = q.dropna(subset=["_shares"]).sort_values(["year", "quarter"]).groupby("code")["_shares"].last()
+    q["share_factor"] = (q["_shares"] / q["code"].map(latest)).where(lambda x: (x > 1.2) | (x < 1 / 1.2), 1.0).fillna(1.0).round(6)
+    q = q.drop(columns=["_shares", "_prev_shares"])
     q = q.merge(bs.drop_duplicates(["code", "year", "quarter"], keep="last")
                 [["code", "year", "quarter", "total_assets", "total_liabilities", "parent_equity", "total_equity", "bvps"]],
                 on=["code", "year", "quarter"], how="outer")

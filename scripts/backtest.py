@@ -119,6 +119,22 @@ def main():
         lines.append(f"| {p} | " + " | ".join(cells) + " |")
     best = (df[[k + "_err" for k in methods]].idxmin(axis=1).str.replace("_err", "").value_counts(normalize=True))
     lines.append("\n各算法「最準」的比例：" + "、".join(f"{k} {v:.0%}" for k, v in best.items()))
+    # 依目前市值分組（市值＝最新收盤價 × 上市櫃股數）
+    try:
+        from twdata.common import LATEST
+        px = pd.read_csv(LATEST / "prices.csv", dtype={"code": str}).set_index("code")["close"]
+        cap = (px * co.set_index("code")["listed_shares"]).dropna().sort_values(ascending=False)
+        tiers = [("市值前 200 大", set(cap.index[:200])), ("市值 201～600 名", set(cap.index[200:600])),
+                 ("其他中小型股", set(df["code"]) - set(cap.index[:600]))]
+        lines += ["", "## 依市值分組（誤差中位數）", "", "| 分組 | 家數 | 時間點 | " + " | ".join(methods) + " |",
+                  "|---|---|---|" + "---|" * len(methods)]
+        for lab, S in tiers:
+            s = df[df["code"].isin(S)]
+            for p in [x[0] for x in POINTS]:
+                t = s[s["point"] == p]
+                lines.append(f"| {lab} | {s['code'].nunique()} | {p} | " + " | ".join(f"{t[k + '_err'].median():.1%}" for k in methods) + " |")
+    except FileNotFoundError:
+        pass
     out = ROOT / "reports" / "backtest.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     df.to_csv(ROOT / "reports" / "backtest_detail.csv", index=False)

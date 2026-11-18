@@ -128,6 +128,9 @@ def main():
         rec = {"code": code, "name": c["name"], "market": c["market"], "industry": c["industry"]}
         qd = {(int(x.year), int(x.quarter)): {k: (None if pd.isna(v) else v) for k, v in x._asdict().items()}
               for x in qg.get(code, pd.DataFrame(columns=q.columns)).itertuples(index=False)}
+        for v in qd.values():   # 每股數字一律換算到目前股數（拆股、面額變更、大幅增資後才可比較）
+            if v.get("eps") is not None and v.get("share_factor"):
+                v["eps_reported"], v["eps"] = v["eps"], v["eps"] * v["share_factor"]
         m = {(int(x.year), int(x.month)): x.revenue for x in mg.get(code, pd.DataFrame(columns=mr.columns)).itertuples(index=False)
              if not pd.isna(x.revenue)}
         p = pxd.get(code, {})
@@ -173,8 +176,9 @@ def main():
                 continue
             ey = sum(e)
             d = dd.get(yy)
-            cash = float(d.cash_dividend) if d is not None else 0.0
-            stock = float(d.stock_dividend) if d is not None else 0.0
+            fac = st.mean(qd[(yy, k)].get("share_factor") or 1 for k in range(1, 5))
+            cash = float(d.cash_dividend) * fac if d is not None else 0.0
+            stock = float(d.stock_dividend) * fac if d is not None else 0.0
             hist.append({"y": yy, "eps": r(ey, 2), "cash": r(cash, 4), "stock": r(stock, 4)})
         valid = [h for h in hist if h["eps"] and h["eps"] > 0]
         cr = st.mean(h["cash"] / h["eps"] for h in valid) if valid else None
@@ -227,7 +231,7 @@ def main():
                             "price": str(px["date"].max())},
            "method": "今年預估 EPS＝已公布季 EPS＋剩餘營收×近四季淨利率÷股數；全年營收用旺淡季係數推估；自由現金流＝營業現金流＋投資現金流",
            "stocks": out}
-    (SITE / "stocks.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    (SITE / "stocks.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":"), default=lambda o: o.item() if hasattr(o, "item") else str(o)), encoding="utf-8")
     ok = sum(1 for s in out if s.get("eps", {}).get("forecast") is not None)
     print(f"stocks.json：{len(out)} 家，有預估 EPS {ok} 家，{(SITE / 'stocks.json').stat().st_size / 1e6:.1f} MB")
 
