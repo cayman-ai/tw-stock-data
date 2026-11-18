@@ -20,9 +20,13 @@ jobs:
         with: { python-version: '3.11' }
       - run: pip install -q requests pandas lxml
       - name: 執行
-        run: mkdir -p out && ${{ inputs.cmd }} 2>&1 | tee out/log.txt
-      - name: 資料存回 main
-        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p out
+          ${{ inputs.cmd }} 2>&1 | tee out/log.txt
+      - name: 資料存回 main（只有全部成功才提交）
+        if: success()
         run: |
           git add data/ || true
           if ! git diff --cached --quiet; then

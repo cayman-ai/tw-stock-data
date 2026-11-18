@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -20,14 +21,42 @@ from twdata import sources  # noqa: E402
 from twdata.common import HISTORY, LATEST, PARTS  # noqa: E402
 
 
-def save(path: Path, rows: list[dict]):
+# 完整性門檻：(最少筆數, {必要欄位: 最低非空比例})。不達標就報錯，不寫檔、不覆蓋舊檔。
+CHECKS = {
+    "companies": (1500, {"name": 0.99, "industry_code": 0.99}),
+    "prices": (1500, {"close": 0.8}),
+    "revenue": (500, {"revenue": 0.95}),
+    "is": (500, {"eps": 0.95, "net_income": 0.9, "revenue": 0.85}),
+    "bs": (500, {"total_assets": 0.95, "total_equity": 0.95}),
+    "cf": (500, {"operating_cash_flow": 0.9}),
+    "dividends": (300, {"period": 1.0}),
+}
+
+
+class IncompleteData(RuntimeError):
+    pass
+
+
+def check(kind: str, label: str, rows: list[dict]):
+    n_min, req = CHECKS[kind]
+    if len(rows) < n_min:
+        raise IncompleteData(f"{label}：只有 {len(rows)} 筆，低於門檻 {n_min}，可能官方改版或回傳空資料")
+    for col, ratio in req.items():
+        ok = sum(1 for r in rows if r.get(col) not in (None, "")) / len(rows)
+        if ok < ratio:
+            raise IncompleteData(f"{label}：欄位 {col} 只有 {ok:.0%} 有值（門檻 {ratio:.0%}），可能表頭改名")
+
+
+def save(path: Path, rows: list[dict], kind: str, label: str):
+    """先檢查完整性，再寫暫存檔、原子替換，避免留下半套資料。"""
+    check(kind, label, rows)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        return
-    with path.open("w", newline="", encoding="utf-8") as f:
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, path)
 
 
 def latest_month(today: date) -> tuple[int, int]:
@@ -78,11 +107,11 @@ def main():
 
     if a.what == "companies":
         rows = [r for m in markets for r in sources.companies(m)]
-        save(HISTORY / "companies.csv", rows)
+        save(HISTORY / "companies.csv", rows, "companies", "公司資料")
         print(f"公司 {len(rows)} 家")
     elif a.what == "prices":
         rows = sources.prices()
-        save(LATEST / "prices.csv", rows)
+        save(LATEST / "prices.csv", rows, "prices", "股價")
         print(f"股價 {len(rows)} 檔，日期 {rows[0]['date'] if rows else '-'}")
     elif a.what == "revenue":
         periods = back(*latest_month(today), a.months, 12)
@@ -92,7 +121,7 @@ def main():
                 if p.exists() and i >= a.refresh:
                     continue
                 rows = sources.monthly_revenue(m, y, mo)
-                save(p, rows)
+                save(p, rows, "revenue", f"月營收 {m} {y}-{mo:02d}")
                 print(f"月營收 {m} {y}-{mo:02d}: {len(rows)} 家", flush=True)
     elif a.what in ("is", "bs", "cf"):
         fn = {"is": sources.income_statement, "bs": sources.balance_sheet, "cf": sources.cash_flow}[a.what]
@@ -103,7 +132,7 @@ def main():
                 if p.exists() and i >= a.refresh:
                     continue
                 rows = fn(m, y, q)
-                save(p, rows)
+                save(p, rows, a.what, f"{a.what} {m} {y}Q{q}")
                 print(f"{a.what} {m} {y}Q{q}: {len(rows)} 家", flush=True)
     elif a.what == "dividends":
         for i, y in enumerate(range(today.year, today.year - a.years, -1)):
@@ -112,7 +141,7 @@ def main():
                 if p.exists() and i >= a.refresh + 1:
                     continue
                 rows = sources.dividends(m, y)
-                save(p, rows)
+                save(p, rows, "dividends", f"股利 {m} {y}")
                 print(f"股利 {m} 查詢年度 {y}: {len(rows)} 筆", flush=True)
 
 

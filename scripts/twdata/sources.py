@@ -36,7 +36,9 @@ def companies(market: str) -> list[dict]:
         shares = (cap / par_v - pref) if cap and par_v else None
         out.append(dict(code=str(code).strip(), name=(r.get("公司簡稱") or r.get("CompanyAbbreviation") or "").strip(),
                         market=MARKETS[market], industry_code=ind, industry=INDUSTRY.get(ind, ind),
-                        listed_shares=round(shares) if shares else None))
+                        listed_shares=round(shares) if shares else None,
+                        # 編制財務報表類型：1＝合併報表（有子公司）、2＝個體報表（無子公司）
+                        report_type=str(r.get("編制財務報表類型") or r.get("PreparationOfFinancialReportType") or "").strip()))
     return out
 
 
