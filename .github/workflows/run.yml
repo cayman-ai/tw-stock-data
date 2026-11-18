@@ -1,0 +1,21 @@
+name: 執行程式
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: 要執行的指令（在 repo 根目錄）
+        required: true
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -q requests pandas lxml
+      - name: 執行
+        run: mkdir -p out && ${{ inputs.cmd }} 2>&1 | tee out/log.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: out, path: out, retention-days: 3 }
