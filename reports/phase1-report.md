@@ -2,7 +2,7 @@
 
 ## 結論
 
-全市場資料已抓齊並通過抽樣核對，網頁成品 `data/site/stocks.json` 已產生（1,991 家，1,942 家有預估 EPS，2.2 MB）。
+全市場資料已抓齊並通過抽樣核對，網頁成品 `data/site/stocks.json` 已產生（1,991 家，1,932 家有預估 EPS，2.9 MB）。2026-11-18 依 Codex 審查修正，見 reports/review-response.md。
 
 ## 執行環境
 

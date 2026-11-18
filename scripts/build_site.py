@@ -1,7 +1,10 @@
 """由 data/history 與 data/latest 計算網頁成品 data/site/stocks.json。算法見 docs/SPEC.md 第 4 節。
 
-主算法（2026-11-18 回測選定）：今年預估 EPS ＝ 已公布季 EPS ＋ 剩餘營收 × 近四季淨利率 ÷ 股數
-  全年營收 ＝ 今年已公布月營收累計 × 旺淡季係數（前 2～4 個完整年度「全年 ÷ 同期累計」中位數）
+原則：缺資料就輸出 null 並寫明原因，不用 0 補。
+
+主算法：今年預估 EPS ＝ 已公布季 EPS ＋ 剩餘營收 × 近四季淨利率 ÷ 股數
+  全年營收（月營收口徑）＝ 今年已公布月營收累計 × 旺淡季係數（前 2～4 個完整年度「全年 ÷ 同期累計」中位數）
+  月營收與財報營收口徑不同的公司（例如財報採淨額認列），用「已公布季度的財報營收 ÷ 同期月營收」換算到財報口徑。
 """
 from __future__ import annotations
 
@@ -21,14 +24,16 @@ EXCLUDED_INDUSTRY = {"14", "17"}          # 建材營造業、金融保險業
 SITE = ROOT / "data" / "site"
 
 
+def ok(x):
+    return x is not None and not (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))
+
+
 def r(x, n=4):
-    return None if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) else round(x, n)
+    return round(float(x), n) if ok(x) else None
 
 
 def div(a, b):
-    if a is None or b is None or b == 0 or (isinstance(a, float) and math.isnan(a)) or (isinstance(b, float) and math.isnan(b)):
-        return None
-    return a / b
+    return a / b if ok(a) and ok(b) and b != 0 else None
 
 
 def q_back(y, q, n):
@@ -41,8 +46,13 @@ def q_back(y, q, n):
     return out
 
 
+def total(qd, keys, field):
+    """多季加總；任何一季缺該欄位就回傳 None（不把缺值當 0）。"""
+    vals = [qd.get(k, {}).get(field) for k in keys]
+    return sum(vals) if all(ok(v) for v in vals) else None
+
+
 def seasonal_factor(m: dict, Y: int, nm: int):
-    """前 2～4 個完整年度「全年營收 ÷ 前 nm 個月累計」的中位數；不足 2 年回傳 None。"""
     f = []
     for yy in range(Y - 4, Y):
         if all((yy, k) in m for k in range(1, 13)):
@@ -53,7 +63,6 @@ def seasonal_factor(m: dict, Y: int, nm: int):
 
 
 def month_weights(m: dict, Y: int):
-    """各月份占全年營收比重（前幾個完整年度中位數），用來把剩餘營收分配到各季。"""
     w = {}
     for k in range(1, 13):
         vals = []
@@ -67,44 +76,56 @@ def month_weights(m: dict, Y: int):
 
 
 def forecast_eps(qd: dict, m: dict, Y: int, shares: float, latest_q: tuple):
-    """回傳 (預估 EPS, 明細) 或 (None, 原因)。qd：{(y,q): row}，m：{(y,mo): 營收}。"""
-    nq = max([q for (y, q) in qd if y == Y and qd[(y, q)].get("eps") is not None], default=0)
+    """回傳 (預估 EPS, 明細 dict) 或 (None, 原因字串)。"""
+    pub_q = sorted(q for (y, q) in qd if y == Y and ok(qd[(y, q)].get("eps")))
+    nq = len(pub_q)
+    if pub_q != list(range(1, nq + 1)):
+        return None, "今年已公布季度不連續"
+    if any(not ok(qd[(Y, q)].get("revenue")) for q in pub_q):
+        return None, "今年財報營收缺漏"
     nm = max([mo for (y, mo) in m if y == Y], default=0)
     if nm == 0:
         return None, "今年尚無月營收"
     if any((Y, k) not in m for k in range(1, nm + 1)):
         return None, "今年月營收有缺漏"
-    ytd = sum(m[(Y, k)] for k in range(1, nm + 1))
-    if nm == 12:
-        annual, factor, nf = ytd, 1.0, 0
-    else:
-        factor, nf = seasonal_factor(m, Y, nm)
-        annual = ytd * factor if factor else ytd / nm * 12
-    stmt_rev = sum(qd[(Y, q)]["revenue"] or 0 for q in range(1, nq + 1))
+    if nm < 3 * nq:
+        return None, "月營收比財報還舊"
     last4 = q_back(*latest_q, 4)
-    if any(k not in qd for k in last4):
-        return None, "近四季財報不完整"
-    rev4 = sum(qd[k]["revenue"] or 0 for k in last4)
-    ni4 = sum(qd[k]["parent_net_income"] or 0 for k in last4)
+    rev4, ni4 = total(qd, last4, "revenue"), total(qd, last4, "parent_net_income")
     margin = div(ni4, rev4)
     if margin is None:
-        return None, "近四季營收為 0"
-    pub = sum(qd[(Y, q)]["eps"] for q in range(1, nq + 1))
-    remaining = max(0.0, annual - stmt_rev)
-    # 剩餘營收分配到各季：已公布月份用實際，未公布月份依歷史月份比重分配
+        return None, "近四季營收或母公司淨利缺漏"
+    # 月營收 → 財報口徑換算比例
+    if nq > 0:
+        ratio = div(sum(qd[(Y, q)]["revenue"] for q in pub_q), sum(m[(Y, k)] for k in range(1, 3 * nq + 1)))
+    else:
+        ly = [(Y - 1, q) for q in range(1, 5)]
+        ratio = div(total(qd, ly, "revenue"), sum(m[(Y - 1, k)] for k in range(1, 13))) if all((Y - 1, k) in m for k in range(1, 13)) else None
+    if ratio is None or ratio <= 0:
+        return None, "無法比對月營收與財報營收口徑"
+    ytd = sum(m[(Y, k)] for k in range(1, nm + 1))
+    if nm == 12:
+        annual_m, factor, nf = ytd, 1.0, 0
+    else:
+        factor, nf = seasonal_factor(m, Y, nm)
+        annual_m = ytd * factor if factor else ytd / nm * 12
+    annual_m = max(annual_m, ytd)
+    # 剩餘季度（月營收口徑）：已公布月份用實際，未公布月份依歷史月份比重分配，再換算到財報口徑
     w = month_weights(m, Y)
-    unknown = [k for k in range(nm + 1, 13)]
+    unknown = list(range(nm + 1, 13))
     wsum = sum(w[k] for k in unknown) or 1
-    rest = max(0.0, annual - ytd)
-    est = []
+    rest = annual_m - ytd
+    est, rem_eps = [], 0.0
     for q in range(nq + 1, 5):
         months = range(q * 3 - 2, q * 3 + 1)
-        rev = sum(m[(Y, k)] if k <= nm else rest * w[k] / wsum for k in months)
-        est.append({"q": q, "eps": r(rev * margin / shares, 2), "actual_months": sum(1 for k in months if k <= nm)})
-    eps = pub + remaining * margin / shares
-    return eps, {"published": [{"q": q, "eps": r(qd[(Y, q)]["eps"], 2)} for q in range(1, nq + 1)],
-                 "estimated": est, "margin_ttm": r(margin), "seasonal_factor": r(factor) if factor else None,
-                 "seasonal_years": nf, "annual_revenue_est": r(annual, 0), "months_published": nm}
+        rev = ratio * sum(m[(Y, k)] if k <= nm else rest * w[k] / wsum for k in months)
+        e = rev * margin / shares
+        rem_eps += e
+        est.append({"q": q, "eps": r(e, 2), "actual_months": sum(1 for k in months if k <= nm)})
+    pub = sum(qd[(Y, q)]["eps"] for q in pub_q)
+    return pub + rem_eps, {"published": [{"q": q, "eps": r(qd[(Y, q)]["eps"], 2)} for q in pub_q],
+                           "estimated": est, "margin_ttm": r(margin), "seasonal_factor": r(factor) if factor else None,
+                           "seasonal_years": nf, "revenue_basis_ratio": r(ratio), "months_published": nm}
 
 
 def main():
@@ -114,9 +135,9 @@ def main():
     dv = pd.read_csv(HISTORY / "dividends.csv", dtype={"code": str})
     px = pd.read_csv(LATEST / "prices.csv", dtype={"code": str})
     Y = int(mr["year"].max())
-    latest_month = mr[mr["year"] == Y]["month"].max()
-    gq = q.dropna(subset=["eps"])
-    gy, gqq = gq.sort_values(["year", "quarter"]).iloc[-1][["year", "quarter"]]
+    latest_month = int(mr[mr["year"] == Y]["month"].max())
+    gq = q.dropna(subset=["eps"]).sort_values(["year", "quarter"]).iloc[-1]
+    max_div_year = int(dv["earnings_year"].max())
 
     qg = {c: g for c, g in q.groupby("code")}
     mg = {c: g for c, g in mr.groupby("code")}
@@ -126,17 +147,16 @@ def main():
     for _, c in co.iterrows():
         code = c["code"]
         rec = {"code": code, "name": c["name"], "market": c["market"], "industry": c["industry"]}
-        qd = {(int(x.year), int(x.quarter)): {k: (None if pd.isna(v) else v) for k, v in x._asdict().items()}
-              for x in qg.get(code, pd.DataFrame(columns=q.columns)).itertuples(index=False)}
-        for v in qd.values():   # 每股數字一律換算到目前股數（拆股、面額變更、大幅增資後才可比較）
-            if v.get("eps") is not None and v.get("share_factor"):
-                v["eps_reported"], v["eps"] = v["eps"], v["eps"] * v["share_factor"]
-        m = {(int(x.year), int(x.month)): x.revenue for x in mg.get(code, pd.DataFrame(columns=mr.columns)).itertuples(index=False)
-             if not pd.isna(x.revenue)}
+        qd = {}
+        for x in qg.get(code, pd.DataFrame(columns=q.columns)).itertuples(index=False):
+            v = {k: (val if ok(val) else None) for k, val in x._asdict().items()}
+            if v.get("eps") is not None:   # 每股數字換算到目前股數（拆股、面額變更、大幅增資後才可比較）
+                v["eps_reported"], v["eps"] = v["eps"], v["eps"] * (v.get("share_factor") or 1)
+            qd[(int(x.year), int(x.quarter))] = v
+        m = {(int(x.year), int(x.month)): float(x.revenue) for x in mg.get(code, pd.DataFrame(columns=mr.columns)).itertuples(index=False) if ok(x.revenue)}
         p = pxd.get(code, {})
-        price = p.get("close") if p and not pd.isna(p.get("close")) else None
-        rec.update(price=price, pe=p.get("pe") if p and not pd.isna(p.get("pe")) else None,
-                   pb=p.get("pb") if p and not pd.isna(p.get("pb")) else None)
+        price = p.get("close") if ok(p.get("close")) and p.get("close") > 0 else None
+        rec.update(price=price, pe=p.get("pe") if ok(p.get("pe")) else None, pb=p.get("pb") if ok(p.get("pb")) else None)
         withq = [k for k, v in qd.items() if v.get("eps") is not None]
         if not withq:
             rec["error"] = "無財報資料"
@@ -144,96 +164,125 @@ def main():
             continue
         lq = max(withq)
         last4 = q_back(*lq, 4)
-        full4 = all(k in qd and qd[k].get("eps") is not None for k in last4)
-        ttm_eps = sum(qd[k]["eps"] for k in last4) if full4 else None
-        ni4 = sum(qd[k]["parent_net_income"] or 0 for k in last4) if full4 else None
-        rev4 = sum(qd[k]["revenue"] or 0 for k in last4) if full4 else None
         lv = qd[lq]
-        shares = div(lv.get("parent_net_income"), lv.get("eps")) if lv.get("eps") and abs(lv["eps"]) >= 0.05 else None
+        ttm_eps = total(qd, last4, "eps")
+        ni4, rev4 = total(qd, last4, "parent_net_income"), total(qd, last4, "revenue")
+        # 股數（千股）：最新一季母公司淨利 ÷ EPS（EPS 太小時誤差大，改用上市櫃股數）
+        shares = div(lv.get("parent_net_income"), lv.get("eps_reported")) if lv.get("eps_reported") and abs(lv["eps_reported"]) >= 0.3 else None
         if not shares or shares <= 0:
-            shares = c["listed_shares"] / 1000 if not pd.isna(c["listed_shares"]) else None   # 千股
-        eps_f, detail = (None, "缺少股數") if not shares else forecast_eps(qd, m, Y, shares, lq) if full4 else (None, "近四季財報不完整")
-        ly = [qd.get((Y - 1, k), {}).get("eps") for k in range(1, 5)]
-        last_year_eps = sum(ly) if all(v is not None for v in ly) else None
-        rec["eps"] = {"forecast": r(eps_f, 2), "last_year": r(last_year_eps, 2), "ttm": r(ttm_eps, 2),
-                      "growth": r(div(eps_f, last_year_eps) - 1) if eps_f is not None and last_year_eps and last_year_eps > 0 else None,
+            shares = c["listed_shares"] / 1000 if ok(c["listed_shares"]) else None
+        if not shares:
+            eps_f, detail = None, "缺少股數"
+        else:
+            eps_f, detail = forecast_eps(qd, m, Y, shares, lq)
+        ly = total(qd, [(Y - 1, k) for k in range(1, 5)], "eps")
+        rec["eps"] = {"target_year": Y, "forecast": r(eps_f, 2), "last_year": r(ly, 2), "ttm": r(ttm_eps, 2),
+                      "growth": r(div(eps_f, ly) - 1) if eps_f is not None and ly and ly > 0 else None,
                       "shares_thousand": r(shares, 0), "latest_quarter": f"{lq[0]}Q{lq[1]}"}
         if isinstance(detail, dict):
             rec["eps"].update(detail)
         else:
             rec["eps"]["note"] = detail
         # ROE（近四季）
-        q4ago = qd.get(q_back(*lq, 5)[-1], {})
-        eq_avg = (lv.get("parent_equity") + q4ago.get("parent_equity")) / 2 if lv.get("parent_equity") and q4ago.get("parent_equity") else None
-        rec["roe_ttm"] = r(div(ni4, eq_avg))
-        rec["external_roe"] = r(div(eps_f, price)) if eps_f is not None else None
-        # 股利：近 5 年平均配發率（EPS ≤ 0 的年度不列入）
+        eq_now, eq_ago = lv.get("parent_equity"), qd.get(q_back(*lq, 5)[-1], {}).get("parent_equity")
+        rec["roe_ttm"] = r(div(ni4, (eq_now + eq_ago) / 2)) if ok(eq_now) and ok(eq_ago) and eq_now + eq_ago > 0 else None
+        rec["external_roe"] = r(div(eps_f, price))
+        # 股利：近 5 年平均配發率（EPS ≤ 0 年度不列入）
+        # 除權息彙總涵蓋所有實際配發；資料中最新的盈餘年度可能還沒配完，沒有紀錄時視為「未知」，較早年度沒有紀錄才視為未配發。
         dd = {int(x.earnings_year): x for x in dg.get(code, pd.DataFrame(columns=dv.columns)).itertuples(index=False)}
         hist = []
         for yy in range(Y - 1, Y - 6, -1):
-            e = [qd.get((yy, k), {}).get("eps") for k in range(1, 5)]
-            if any(v is None for v in e):
+            ey = total(qd, [(yy, k) for k in range(1, 5)], "eps")
+            if ey is None:
+                hist.append({"y": yy, "eps": None, "cash": None, "stock": None, "status": "缺財報"})
                 continue
-            ey = sum(e)
-            d = dd.get(yy)
             fac = st.mean(qd[(yy, k)].get("share_factor") or 1 for k in range(1, 5))
-            cash = float(d.cash_dividend) * fac if d is not None else 0.0
-            stock = float(d.stock_dividend) * fac if d is not None else 0.0
-            hist.append({"y": yy, "eps": r(ey, 2), "cash": r(cash, 4), "stock": r(stock, 4)})
-        valid = [h for h in hist if h["eps"] and h["eps"] > 0]
+            d = dd.get(yy)
+            if d is not None:
+                hist.append({"y": yy, "eps": r(ey, 2), "cash": r(float(d.cash_dividend) * fac, 4), "stock": r(float(d.stock_dividend) * fac, 4), "status": "已配發"})
+            elif yy >= max_div_year - 1 and yy >= Y - 1:
+                hist.append({"y": yy, "eps": r(ey, 2), "cash": None, "stock": None, "status": "尚未配發或資料未到"})
+            else:
+                hist.append({"y": yy, "eps": r(ey, 2), "cash": 0.0, "stock": 0.0, "status": "未配發"})
+        valid = [h for h in hist if h["eps"] is not None and h["eps"] > 0 and h["cash"] is not None]
         cr = st.mean(h["cash"] / h["eps"] for h in valid) if valid else None
         sr = st.mean(h["stock"] / h["eps"] for h in valid) if valid else None
-        cash_f = eps_f * cr if eps_f is not None and eps_f > 0 and cr is not None else None
+        pos_eps = eps_f is not None and eps_f > 0
+        cash_f = eps_f * cr if pos_eps and cr is not None else None
+        stock_f = eps_f * sr if pos_eps and sr is not None else None
         streak = 0
         for h in hist:
+            if h["cash"] is None:
+                if h["status"] == "尚未配發或資料未到" and streak == 0:
+                    continue          # 最新年度還沒配，從前一年開始算
+                break
             if h["cash"] > 0:
                 streak += 1
             else:
                 break
-        rec["dividend"] = {"cash": r(cash_f, 2), "stock": r(eps_f * sr, 2) if cash_f is not None and sr is not None else None,
-                           "cash_ratio": r(cr), "stock_ratio": r(sr), "years_used": len(valid),
-                           "yield": r(div(cash_f, price)), "history": hist}
+        rec["dividend"] = {"cash": r(cash_f, 2), "stock": r(stock_f, 2), "cash_ratio": r(cr), "stock_ratio": r(sr),
+                           "years_used": len(valid), "yield": r(div(cash_f, price)), "history": hist}
         # 營收
         lm = max(m) if m else None
-        mrow = mg[code].set_index(["year", "month"]).loc[lm] if lm else None
-        rec["revenue"] = {"latest_month": f"{lm[0]}-{lm[1]:02d}" if lm else None,
-                          "mom_yoy": r(div(mrow["revenue"], mrow["last_year_revenue"]) - 1) if lm is not None and mrow["last_year_revenue"] else None,
-                          "ytd_yoy": r(div(mrow["ytd_revenue"], mrow["last_year_ytd_revenue"]) - 1) if lm is not None and mrow["last_year_ytd_revenue"] else None}
-        # 自由現金流（營業現金流＋投資現金流）
-        fcf4 = sum((qd[k].get("operating_cash_flow") or 0) + (qd[k].get("investing_cash_flow") or 0) for k in last4) if full4 else None
-        ocf4 = sum(qd[k].get("operating_cash_flow") or 0 for k in last4) if full4 else None
-        pos = 0
+        rv = {"latest_month": None, "mom_yoy": None, "ytd_yoy": None}
+        if lm:
+            row = mg[code].set_index(["year", "month"]).loc[lm]
+            g1, g2 = div(row["revenue"], row["last_year_revenue"]), div(row["ytd_revenue"], row["last_year_ytd_revenue"])
+            rv = {"latest_month": f"{lm[0]}-{lm[1]:02d}", "mom_yoy": r(g1 - 1) if g1 is not None else None,
+                  "ytd_yoy": r(g2 - 1) if g2 is not None else None}
+        rec["revenue"] = rv
+        # 簡易自由現金流＝營業現金流＋投資現金流（官方彙總表沒有資本支出；投資現金流含金融資產買賣，為近似值）
+        ocf4, icf4 = total(qd, last4, "operating_cash_flow"), total(qd, last4, "investing_cash_flow")
+        fcf4 = ocf4 + icf4 if ocf4 is not None and icf4 is not None else None
+        pos, known = 0, 0
         for yy in range(Y - 1, Y - 6, -1):
             ks = [(yy, k) for k in range(1, 5)]
-            if all(k in qd and qd[k].get("operating_cash_flow") is not None for k in ks):
-                pos += sum((qd[k]["operating_cash_flow"] or 0) + (qd[k].get("investing_cash_flow") or 0) for k in ks) > 0
+            o, i = total(qd, ks, "operating_cash_flow"), total(qd, ks, "investing_cash_flow")
+            if o is not None and i is not None:
+                known += 1
+                pos += (o + i) > 0
         fps = div(fcf4, shares)
-        rec["fcf"] = {"per_share_ttm": r(fps, 2), "yield": r(div(fps, price)), "positive_years_5y": pos}
-        gp4 = sum(qd[k].get("gross_profit") or 0 for k in last4) if full4 else None
-        op4 = sum(qd[k].get("operating_income") or 0 for k in last4) if full4 else None
-        nit4 = sum(qd[k].get("net_income") or 0 for k in last4) if full4 else None
+        rec["fcf"] = {"basis": "營業現金流＋投資現金流（近似）", "per_share_ttm": r(fps, 2), "yield": r(div(fps, price)),
+                      "positive_years_5y": pos if known == 5 else None, "known_years": known}
+        gp4, op4, nit4 = total(qd, last4, "gross_profit"), total(qd, last4, "operating_income"), total(qd, last4, "net_income")
         rec["quality"] = {"gross_margin": r(div(gp4, rev4)), "operating_margin": r(div(op4, rev4)),
-                          "cash_conversion": r(div(ocf4, nit4)) if nit4 and nit4 > 0 else None,
+                          "cash_conversion": r(div(ocf4, nit4)) if nit4 is not None and nit4 > 0 else None,
                           "debt_ratio": r(div(lv.get("total_liabilities"), lv.get("total_assets"))), "dividend_streak": streak}
-        # 可信度：近 8 季單季淨利率波動大，或近 8 季有虧損季
-        margins = [div(qd[k]["parent_net_income"], qd[k]["revenue"]) for k in q_back(*lq, 8)
-                   if k in qd and qd[k].get("revenue") and qd[k].get("parent_net_income") is not None]
-        low_conf = len(margins) < 8 or st.pstdev(margins) > 0.05 or any(x < 0 for x in margins)
+        # 可信度低：近 8 季單季淨利率波動大、近 8 季有虧損季、營收年增率波動大、或月營收與財報口徑差距大
+        k8 = q_back(*lq, 8)
+        margins = [div(qd[k].get("parent_net_income"), qd[k].get("revenue")) for k in k8 if k in qd]
+        margins = [x for x in margins if x is not None]
+        yoys = [div(qd.get(k, {}).get("revenue"), qd.get((k[0] - 1, k[1]), {}).get("revenue")) for k in k8]
+        yoys = [x - 1 for x in yoys if x is not None]
+        ratio = rec["eps"].get("revenue_basis_ratio")
+        reasons = []
+        if len(margins) < 8:
+            reasons.append("財報季數不足 8 季")
+        elif st.pstdev(margins) > 0.05:
+            reasons.append("淨利率波動大")
+        if any(x < 0 for x in margins):
+            reasons.append("近 8 季有虧損")
+        if len(yoys) >= 6 and st.pstdev(yoys) > 0.3:
+            reasons.append("營收年增率波動大")
+        if ratio is not None and not 0.8 <= ratio <= 1.25:
+            reasons.append("月營收與財報營收口徑差異大")
         rec["flags"] = {"excluded_industry": c["industry_code"] in EXCLUDED_INDUSTRY,
-                        "loss": (ttm_eps is not None and ttm_eps <= 0) or (eps_f is not None and eps_f <= 0),
-                        "ytd_revenue_decline": rec["revenue"]["ytd_yoy"] is not None and rec["revenue"]["ytd_yoy"] < 0,
-                        "low_confidence": bool(low_conf)}
+                        "loss": bool((ttm_eps is not None and ttm_eps <= 0) or (eps_f is not None and eps_f <= 0)),
+                        "ytd_revenue_decline": bool(rv["ytd_yoy"] is not None and rv["ytd_yoy"] < 0),
+                        "low_confidence": bool(reasons), "low_confidence_reasons": reasons}
         out.append(rec)
 
     SITE.mkdir(parents=True, exist_ok=True)
     doc = {"as_of": date.today().isoformat(), "target_year": Y,
-           "sources_date": {"monthly_revenue": f"{Y}-{int(latest_month):02d}", "quarterly": f"{int(gy)}Q{int(gqq)}",
+           "sources_date": {"monthly_revenue": f"{Y}-{latest_month:02d}", "quarterly": f"{int(gq['year'])}Q{int(gq['quarter'])}",
                             "price": str(px["date"].max())},
-           "method": "今年預估 EPS＝已公布季 EPS＋剩餘營收×近四季淨利率÷股數；全年營收用旺淡季係數推估；自由現金流＝營業現金流＋投資現金流",
+           "method": "今年預估 EPS＝已公布季 EPS＋剩餘營收×近四季淨利率÷股數；全年營收用旺淡季係數推估並換算到財報口徑；"
+                     "自由現金流為近似值（營業現金流＋投資現金流）；缺資料為 null",
            "stocks": out}
-    (SITE / "stocks.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":"), default=lambda o: o.item() if hasattr(o, "item") else str(o)), encoding="utf-8")
-    ok = sum(1 for s in out if s.get("eps", {}).get("forecast") is not None)
-    print(f"stocks.json：{len(out)} 家，有預估 EPS {ok} 家，{(SITE / 'stocks.json').stat().st_size / 1e6:.1f} MB")
+    (SITE / "stocks.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":"),
+                                                 default=lambda o: o.item() if hasattr(o, "item") else str(o)), encoding="utf-8")
+    okn = sum(1 for s in out if s.get("eps", {}).get("forecast") is not None)
+    print(f"stocks.json：{len(out)} 家，有預估 EPS {okn} 家，{(SITE / 'stocks.json').stat().st_size / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":

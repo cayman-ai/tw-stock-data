@@ -54,7 +54,9 @@ def run_one(qd, m, y, nq, nm):
     stmt = sum(qd[(y, i)]["revenue"] for i in range(1, nq + 1))
     ytd = sum(m[(y, k)] for k in range(1, nm + 1))
     annual = ytd * seasonal(m, y, nm)
-    main_ = pub + max(0, annual - stmt) * margin / shares
+    # 與 build_site 相同：月營收換算到財報口徑
+    ratio = stmt / sum(m[(y, k)] for k in range(1, 3 * nq + 1))
+    main_ = pub + max(0, annual - ytd) * ratio * margin / shares + (ytd - sum(m[(y, k)] for k in range(1, 3 * nq + 1))) * ratio * margin / shares
     avg3 = sum(m[(y, k)] for k in range(nm - 2, nm + 1)) / 3
     simple = pub + sum((sum(m[(y, k)] if k <= nm else avg3 for k in range(qq * 3 - 2, qq * 3 + 1))) for qq in range(nq + 1, 5)) * margin / shares
     # 舊版
@@ -73,17 +75,19 @@ def run_one(qd, m, y, nq, nm):
         niy = pt - (pt * taxr if pt > 0 else 0)
         old = (niy - nci - max(0, niy - ni) * ncir) / shares
     ttm = sum(qd[k]["eps"] for k in last4)
-    return {"主算法": main_, "簡易版": simple, "舊版": old, "近四季": ttm}
+    return {"主算法": main_, "簡易版": simple, "舊版": old, "近四季": ttm, "rev_ttm": rev4}
 
 
 def main():
     co = pd.read_csv(HISTORY / "companies.csv", dtype={"code": str, "industry_code": str})
-    keep = set(co[~co["industry_code"].isin(["14", "17"])]["code"])
+    # 排除營建、金融。已下市（不在目前名冊）的公司也納入，避免只看存活公司；
+    # 這類公司查不到產業別，以「損益表有毛利欄位」判斷不是金融業。
+    excluded = set(co[co["industry_code"].isin(["14", "17"])]["code"])
     q = pd.read_csv(HISTORY / "quarterly.csv", dtype={"code": str})
     mr = pd.read_csv(HISTORY / "monthly_revenue.csv", dtype={"code": str})
     rows = []
     for code, g in q.groupby("code"):
-        if code not in keep:
+        if code in excluded or g["gross_profit"].isna().all():
             continue
         qd = {(int(x.year), int(x.quarter)): x._asdict() for x in g.itertuples(index=False)
               if not any(pd.isna(getattr(x, c)) for c in ("revenue", "parent_net_income", "eps"))}
@@ -119,22 +123,21 @@ def main():
         lines.append(f"| {p} | " + " | ".join(cells) + " |")
     best = (df[[k + "_err" for k in methods]].idxmin(axis=1).str.replace("_err", "").value_counts(normalize=True))
     lines.append("\n各算法「最準」的比例：" + "、".join(f"{k} {v:.0%}" for k, v in best.items()))
-    # 依目前市值分組（市值＝最新收盤價 × 上市櫃股數）
-    try:
-        from twdata.common import LATEST
-        px = pd.read_csv(LATEST / "prices.csv", dtype={"code": str}).set_index("code")["close"]
-        cap = (px * co.set_index("code")["listed_shares"]).dropna().sort_values(ascending=False)
-        tiers = [("市值前 200 大", set(cap.index[:200])), ("市值 201～600 名", set(cap.index[200:600])),
-                 ("其他中小型股", set(df["code"]) - set(cap.index[:600]))]
-        lines += ["", "## 依市值分組（誤差中位數）", "", "| 分組 | 家數 | 時間點 | " + " | ".join(methods) + " |",
-                  "|---|---|---|" + "---|" * len(methods)]
-        for lab, S in tiers:
-            s = df[df["code"].isin(S)]
-            for p in [x[0] for x in POINTS]:
-                t = s[s["point"] == p]
-                lines.append(f"| {lab} | {s['code'].nunique()} | {p} | " + " | ".join(f"{t[k + '_err'].median():.1%}" for k in methods) + " |")
-    except FileNotFoundError:
-        pass
+    # 依「預估當時」近四季營收規模分組（不用目前市值，避免偷看未來）
+    lines += ["", "## 依預估當時的營收規模分組（誤差中位數）", "",
+              "同一時點、同一年度內，依當時近四季營收排名：前 15%、15～45%、其餘。", "",
+              "| 分組 | 時間點 | 樣本 | " + " | ".join(methods) + " |", "|---|---|---|" + "---|" * len(methods)]
+    df["rank_pct"] = df.groupby(["year", "point"])["rev_ttm"].rank(ascending=False, pct=True)
+    groups = [("大型（前 15%）", df["rank_pct"] <= .15), ("中型（15～45%）", (df["rank_pct"] > .15) & (df["rank_pct"] <= .45)),
+              ("小型（其餘）", df["rank_pct"] > .45)]
+    for lab, mask in groups:
+        for p in [x[0] for x in POINTS]:
+            t = df[mask & (df["point"] == p)]
+            lines.append(f"| {lab} | {p} | {len(t)} | " + " | ".join(f"{t[k + '_err'].median():.1%}" for k in methods) + " |")
+    lines += ["", "## 已知限制", "",
+              "- 財報與月營收是現在抓到的版本，若公司事後更正，回測用的是更正後數字，可能比當時實際能拿到的資料略準。",
+              "- 已下市公司有納入，但上市前、下市後的期間本來就沒有資料。",
+              "- 各時點假設當月最後一天前，前一季財報與上月營收都已公布（依法定期限）；個別延遲申報的公司未逐一處理。"]
     out = ROOT / "reports" / "backtest.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     df.to_csv(ROOT / "reports" / "backtest_detail.csv", index=False)
