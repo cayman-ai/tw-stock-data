@@ -21,6 +21,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from twdata.common import HISTORY, LATEST, ROOT  # noqa: E402
 
 EXCLUDED_INDUSTRY = {"14", "17"}          # 建材營造業、金融保險業
+# 預估區間寬度：全市場回測（reports/backtest.md）主算法的誤差中位數，依營收規模與已公布月營收月數
+# 1～3 月（只有少數月份）用 5 月底的誤差再放寬 1.3 倍
+RANGE = {"大型": (0.20, 0.11, 0.06), "中型": (0.24, 0.15, 0.08), "小型": (0.31, 0.22, 0.13)}
+
+
+def range_pct(tier: str, months: int):
+    may, aug, nov = RANGE[tier]
+    if months <= 3:
+        return may * 1.3
+    if months <= 6:
+        return may
+    if months <= 9:
+        return aug
+    return nov
 SITE = ROOT / "data" / "site"
 
 
@@ -300,8 +314,27 @@ def main():
                         "loss": bool((ttm_eps is not None and ttm_eps <= 0) or (eps_f is not None and eps_f <= 0)),
                         "ytd_revenue_decline": bool(rv["ytd_yoy"] is not None and rv["ytd_yoy"] < 0),
                         "low_confidence": bool(reasons), "low_confidence_reasons": reasons}
+        rec["_rev4"] = rev4
         out.append(rec)
 
+    revs = sorted(((s["_rev4"], s["code"]) for s in out if s.get("_rev4")), reverse=True)
+    rank = {code: i / len(revs) for i, (_, code) in enumerate(revs)}
+    for s_ in out:
+        s_.pop("_rev4", None)
+        e = s_.get("eps")
+        if not e:
+            continue
+        pr = rank.get(s_["code"])
+        tier = None if pr is None else "大型" if pr < .15 else "中型" if pr < .45 else "小型"
+        e["size_tier"] = tier
+        if tier and e.get("forecast") is not None and e.get("months_published"):
+            pct = range_pct(tier, e["months_published"])
+            if s_["flags"]["low_confidence"]:
+                pct *= 1.5
+            f = e["forecast"]
+            band = abs(f) * pct      # 回測誤差是以「全年 EPS」為分母算的，所以區間也以全年 EPS 為基準
+            e["range_pct"] = round(pct, 3)
+            e["range"] = [round(f - band, 2), round(f + band, 2)]
     SITE.mkdir(parents=True, exist_ok=True)
     doc = {"as_of": date.today().isoformat(), "target_year": Y,
            "sources_date": {"monthly_revenue": f"{Y}-{latest_month:02d}", "quarterly": f"{int(gq['year'])}Q{int(gq['quarter'])}",
