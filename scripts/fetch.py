@@ -23,12 +23,12 @@ from twdata.common import HISTORY, LATEST, PARTS  # noqa: E402
 
 # 完整性門檻：(最少筆數, {必要欄位: 最低非空比例})。不達標就報錯，不寫檔、不覆蓋舊檔。
 CHECKS = {
-    "companies": (1500, {"name": 0.99, "industry_code": 0.99}),
-    "prices": (1500, {"close": 0.8}),
-    "revenue": (500, {"revenue": 0.95}),
-    "is": (500, {"eps": 0.95, "net_income": 0.9, "revenue": 0.85}),
-    "bs": (500, {"total_assets": 0.95, "total_equity": 0.95}),
-    "cf": (500, {"operating_cash_flow": 0.9}),
+    "companies": (1500, {"name": 0.99, "industry_code": 0.99, "report_type": 0.99, "listed_shares": 0.95}),
+    "prices": (1500, {"close": 0.8, "pb": 0.7}),
+    "revenue": (500, {"revenue": 0.95, "ytd_revenue": 0.95}),
+    "is": (500, {"eps": 0.95, "net_income": 0.9, "revenue": 0.85, "parent_net_income": 0.6}),
+    "bs": (500, {"total_assets": 0.95, "total_equity": 0.95, "parent_equity": 0.6, "total_liabilities": 0.95}),
+    "cf": (500, {"operating_cash_flow": 0.9, "investing_cash_flow": 0.85}),
     "dividends": (300, {"period": 1.0}),
 }
 

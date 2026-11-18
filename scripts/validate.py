@@ -28,8 +28,10 @@ def main(db_path: str):
     def cmp(label, code, period, ours, theirs, tol=TOL, absolute=False):
         if ours is None or theirs is None or pd.isna(ours) or pd.isna(theirs):
             return "缺"
-        diff = abs(ours - theirs) if absolute else abs(ours - theirs) / max(abs(theirs), 1e-9)
-        ok = diff <= tol
+        if absolute:   # 每股數字：官方以小數兩位公布，先四捨五入到兩位再比對（必須完全相同）
+            ok = round(ours + 1e-9, 2) == round(theirs + 1e-9, 2)
+        else:
+            ok = abs(ours - theirs) / max(abs(theirs), 1e-9) <= tol
         if not ok:
             fails.append(f"| {code} | {label} | {period} | {ours:,.2f} | {theirs:,.2f} |")
         return ok
@@ -76,10 +78,10 @@ def main(db_path: str):
 
     lines.append("# 抽樣核對結果\n")
     lines.append("對照來源：舊站 CT-EPS-Analytics 資料庫（逐家抓公開資訊觀測站 XBRL 財報、月營收頁面、股利頁面）。"
-                 "本專案改用官方彙總表，兩邊來源不同，數字一致即互相印證。容差：金額 0.5%，EPS 與股利 0.01 元。\n")
+                 "本專案改用官方彙總表，兩邊來源不同，數字一致即互相印證。容差：金額 0.5%；EPS 與股利（每股元）四捨五入到小數兩位後必須完全相同。\n")
     lines.append("比對範圍：舊站資料庫只有 2021Q3～2026Q2 的 19～20 季、2023-09～2026-08 的 36 個月月營收、5 個股利年度，"
                  "因此月營收只能核對 36 個月（本專案有 64 個月），其餘月份未經第二來源核對。"
-                 "EPS 與股利用絕對差 0.01 元：官方只公布到小數 2 位，用 0.5% 對小數字（例如 0.5 元）會因四捨五入誤判。\n")
+                 "EPS 與股利比對規則見上。舊站沒有寶雅（5904）的權益資料，該項無法用第二來源核對。\n")
     lines.append("| 股票 | 季營收 | EPS | 母公司權益 | 月營收 | 現金股利 | 股票股利 |")
     lines.append("|---|---|---|---|---|---|---|")
     for code, s in stats.items():

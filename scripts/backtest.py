@@ -53,12 +53,15 @@ def run_one(qd, m, y, nq, nm):
     pub = sum(qd[(y, i)]["eps"] for i in range(1, nq + 1))
     stmt = sum(qd[(y, i)]["revenue"] for i in range(1, nq + 1))
     ytd = sum(m[(y, k)] for k in range(1, nm + 1))
-    annual = ytd * seasonal(m, y, nm)
-    # 與 build_site 相同：月營收換算到財報口徑
-    ratio = stmt / sum(m[(y, k)] for k in range(1, 3 * nq + 1))
-    main_ = pub + max(0, annual - ytd) * ratio * margin / shares + (ytd - sum(m[(y, k)] for k in range(1, 3 * nq + 1))) * ratio * margin / shares
+    annual = max(ytd * seasonal(m, y, nm), ytd)
+    # 三種推估一律先把月營收換算到財報口徑（與 build_site 相同），比較的才只是算法差異
+    m_pub = sum(m[(y, k)] for k in range(1, 3 * nq + 1))       # 已公布季度對應月份的月營收
+    ratio = stmt / m_pub
+    rem_main = (annual - m_pub) * ratio                           # 剩餘營收（財報口徑）
+    main_ = pub + rem_main * margin / shares
     avg3 = sum(m[(y, k)] for k in range(nm - 2, nm + 1)) / 3
-    simple = pub + sum((sum(m[(y, k)] if k <= nm else avg3 for k in range(qq * 3 - 2, qq * 3 + 1))) for qq in range(nq + 1, 5)) * margin / shares
+    rem_simple = sum(sum(m[(y, k)] if k <= nm else avg3 for k in range(qq * 3 - 2, qq * 3 + 1)) for qq in range(nq + 1, 5)) * ratio
+    simple = pub + rem_simple * margin / shares
     # 舊版
     ytdq = [qd[(y, i)] for i in range(1, nq + 1)]
     S = lambda c: sum(d[c] or 0 for d in ytdq)  # noqa: E731
@@ -70,7 +73,7 @@ def run_one(qd, m, y, nq, nm):
         ncir = min(max(nci / ni, 0), .5) if ni > 0 else 0
         non8 = [qd[k]["non_operating"] for k in need_q if k in qd and qd[k]["non_operating"] is not None]
         rem_non = st.median(non8) * (4 - nq) if len(non8) >= 4 else nonop * (4 - nq) / nq
-        rr = max(0, annual - stmt)
+        rr = rem_main                                             # 舊版同樣用財報口徑的剩餘營收
         pt = gp + rr * gp / stmt - (opex + rr * opex / stmt) + nonop + rem_non
         niy = pt - (pt * taxr if pt > 0 else 0)
         old = (niy - nci - max(0, niy - ni) * ncir) / shares
@@ -93,19 +96,19 @@ def main():
               if not any(pd.isna(getattr(x, c)) for c in ("revenue", "parent_net_income", "eps"))}
         m = {(int(x.year), int(x.month)): x.revenue for x in mr[mr["code"] == code].itertuples(index=False) if not pd.isna(x.revenue)}
         for y in YEARS:
-            if not all((y, k) in qd for k in range(1, 5)):
-                continue
-            actual = sum(qd[(y, k)]["eps"] for k in range(1, 5))
-            if abs(actual) < 0.5:
-                continue
+            full = all((y, k) in qd for k in range(1, 5))
+            actual = sum(qd[(y, k)]["eps"] for k in range(1, 5)) if full else None
             for name, nq, nm in POINTS:
                 try:
                     res = run_one(qd, m, y, nq, nm)
                 except (ZeroDivisionError, TypeError, KeyError):
                     res = None
-                if res and res["舊版"] is not None:
+                if res:
                     rows.append({"code": code, "year": y, "point": name, "actual": actual, **res})
-    df = pd.DataFrame(rows)
+    allrows = pd.DataFrame(rows)
+    # 營收規模排名：用預估當時所有有資料的公司排（在依年末實際 EPS 篩選之前），避免用到未來資訊
+    allrows["rank_pct"] = allrows.groupby(["year", "point"])["rev_ttm"].rank(ascending=False, pct=True)
+    df = allrows[allrows["actual"].notna() & (allrows["actual"].abs() >= 0.5) & allrows["舊版"].notna()].copy()
     methods = ["主算法", "簡易版", "舊版", "近四季"]
     for k in methods:
         df[k + "_err"] = (df[k] - df["actual"]).abs() / df["actual"].abs()
@@ -125,9 +128,8 @@ def main():
     lines.append("\n各算法「最準」的比例：" + "、".join(f"{k} {v:.0%}" for k, v in best.items()))
     # 依「預估當時」近四季營收規模分組（不用目前市值，避免偷看未來）
     lines += ["", "## 依預估當時的營收規模分組（誤差中位數）", "",
-              "同一時點、同一年度內，依當時近四季營收排名：前 15%、15～45%、其餘。", "",
+              "同一時點、同一年度內，依當時近四季營收在「當時所有有資料公司」中的排名：前 15%、15～45%、其餘。", "",
               "| 分組 | 時間點 | 樣本 | " + " | ".join(methods) + " |", "|---|---|---|" + "---|" * len(methods)]
-    df["rank_pct"] = df.groupby(["year", "point"])["rev_ttm"].rank(ascending=False, pct=True)
     groups = [("大型（前 15%）", df["rank_pct"] <= .15), ("中型（15～45%）", (df["rank_pct"] > .15) & (df["rank_pct"] <= .45)),
               ("小型（其餘）", df["rank_pct"] > .45)]
     for lab, mask in groups:
@@ -136,7 +138,8 @@ def main():
             lines.append(f"| {lab} | {p} | {len(t)} | " + " | ".join(f"{t[k + '_err'].median():.1%}" for k in methods) + " |")
     lines += ["", "## 已知限制", "",
               "- 財報與月營收是現在抓到的版本，若公司事後更正，回測用的是更正後數字，可能比當時實際能拿到的資料略準。",
-              "- 已下市公司有納入，但上市前、下市後的期間本來就沒有資料。",
+              "- 已下市公司有納入，但上市前、下市後的期間本來就沒有資料；已下市公司查不到產業別，以「損益表有毛利欄位」排除金融業，已下市營建業無法排除。",
+              "- 這是用事後整理的資料做的比較，結論是「各算法相對準確度」，不是當時實際可得的精確誤差。",
               "- 各時點假設當月最後一天前，前一季財報與上月營收都已公布（依法定期限）；個別延遲申報的公司未逐一處理。"]
     out = ROOT / "reports" / "backtest.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")

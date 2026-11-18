@@ -210,16 +210,15 @@ def main():
         pos_eps = eps_f is not None and eps_f > 0
         cash_f = eps_f * cr if pos_eps and cr is not None else None
         stock_f = eps_f * sr if pos_eps and sr is not None else None
-        streak = 0
-        for h in hist:
-            if h["cash"] is None:
-                if h["status"] == "尚未配發或資料未到" and streak == 0:
-                    continue          # 最新年度還沒配，從前一年開始算
+        # 連續配息年數：從「最近一個已確認的年度」往前數，遇到未知或未配發就停止；同時輸出截至年度
+        streak, streak_through = 0, None
+        for i, h in enumerate(hist):
+            if i == 0 and h["status"] == "尚未配發或資料未到":
+                continue
+            if h["cash"] is None or h["cash"] <= 0:
                 break
-            if h["cash"] > 0:
-                streak += 1
-            else:
-                break
+            streak += 1
+            streak_through = streak_through or h["y"]
         rec["dividend"] = {"cash": r(cash_f, 2), "stock": r(stock_f, 2), "cash_ratio": r(cr), "stock_ratio": r(sr),
                            "years_used": len(valid), "yield": r(div(cash_f, price)), "history": hist}
         # 營收
@@ -242,12 +241,15 @@ def main():
                 known += 1
                 pos += (o + i) > 0
         fps = div(fcf4, shares)
-        rec["fcf"] = {"basis": "營業現金流＋投資現金流（近似）", "per_share_ttm": r(fps, 2), "yield": r(div(fps, price)),
-                      "positive_years_5y": pos if known == 5 else None, "known_years": known}
+        # 規格的自由現金流（營業現金流−資本支出）尚無資本支出資料，留 null；近似值另放 fcf_approx，不冒充
+        rec["fcf"] = {"per_share_ttm": None, "yield": None, "positive_years_5y": None, "note": "尚無資本支出資料"}
+        rec["fcf_approx"] = {"basis": "營業現金流＋投資現金流（近似，含金融資產買賣）", "per_share_ttm": r(fps, 2),
+                             "yield": r(div(fps, price)), "positive_years_5y": pos if known == 5 else None, "known_years": known}
         gp4, op4, nit4 = total(qd, last4, "gross_profit"), total(qd, last4, "operating_income"), total(qd, last4, "net_income")
         rec["quality"] = {"gross_margin": r(div(gp4, rev4)), "operating_margin": r(div(op4, rev4)),
                           "cash_conversion": r(div(ocf4, nit4)) if nit4 is not None and nit4 > 0 else None,
-                          "debt_ratio": r(div(lv.get("total_liabilities"), lv.get("total_assets"))), "dividend_streak": streak}
+                          "debt_ratio": r(div(lv.get("total_liabilities"), lv.get("total_assets"))),
+                          "dividend_streak": streak, "dividend_streak_through": streak_through}
         # 可信度低：近 8 季單季淨利率波動大、近 8 季有虧損季、營收年增率波動大、或月營收與財報口徑差距大
         k8 = q_back(*lq, 8)
         margins = [div(qd[k].get("parent_net_income"), qd[k].get("revenue")) for k in k8 if k in qd]

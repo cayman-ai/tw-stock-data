@@ -48,9 +48,11 @@ def revenue_url(market: str, year: int, month: int, foreign: int) -> str:
 
 
 def monthly_revenue(market: str, year: int, month: int) -> list[dict]:
+    """國內（_0）與外國企業（_1）兩張表各自檢查：任一張解析不到公司就報錯，避免整張表消失卻沒發現。"""
     out = {}
     for foreign in (0, 1):
         html = fetch(revenue_url(market, year, month, foreign))
+        before = len(out)
         for t in read_tables(html):
             t = flatten(t)
             if "公司代號" not in t.columns or "當月營收" not in t.columns:
@@ -63,6 +65,8 @@ def monthly_revenue(market: str, year: int, month: int) -> list[dict]:
                                  ytd_revenue=num(r.get("當月累計營收")),
                                  last_year_ytd_revenue=num(r.get("去年累計營收")),
                                  last_year_revenue=num(r.get("去年當月營收")))
+        if len(out) - before < (300 if foreign == 0 else 5):
+            raise RuntimeError(f"月營收 {market} {year}-{month:02d} {'外國' if foreign else '國內'}企業表只解析到 {len(out) - before} 家，可能改版")
     return list(out.values())
 
 
@@ -138,6 +142,11 @@ def dividends(market: str, query_year: int) -> list[dict]:
         t = flatten(t)
         if "公司代號" not in t.columns or "股利所屬期間" not in t.columns:
             continue
+        need = ["盈餘分配之股東現金股利(元/股)", "法定盈餘公積、資本公積發放之現金(元/股)",
+                "盈餘轉增資配股(元/股)", "法定盈餘公積、資本公積轉增資配股(元/股)", "權利分派基準日"]
+        miss = [c for c in need if c not in t.columns]
+        if miss:   # 欄名改了就報錯，不能把「整欄不存在」當成 0
+            raise RuntimeError(f"股利表缺少欄位：{miss}，可能官方改版")
         for _, r in t.iterrows():
             code = str(r["公司代號"]).strip()
             if not is_common_code(code):
