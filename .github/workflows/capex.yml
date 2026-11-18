@@ -1,0 +1,39 @@
+name: 資本支出（逐家，可續跑）
+on:
+  schedule:
+    - cron: "17 */6 * * *"      # 每 6 小時接著抓一批；全部抓完後每次只會快速檢查、沒有要抓的就結束
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tw-stock-data-write
+  cancel-in-progress: false
+jobs:
+  capex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -q requests pandas lxml
+      - name: 抓資本支出（最多 290 分鐘，存檔後結束）
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/fetch_capex.py --minutes 290 2>&1 | tee capex-log.txt
+      - name: 資料存回 main
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add data/parts/capex
+          if ! git diff --cached --quiet; then
+            git -c user.name=tw-stock-data-bot -c user.email=bot@users.noreply.github.com commit -qm "資本支出更新 run ${{ github.run_id }}"
+            pushed=0
+            for i in 1 2 3 4 5; do
+              if git pull -q --rebase --autostash origin main && git push -q origin HEAD:main; then pushed=1; break; fi
+              sleep $((i*7))
+            done
+            if [ "$pushed" != 1 ]; then echo "::error::推送失敗"; exit 1; fi
+          fi

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd  # noqa: E402
 
 from twdata import xbrl  # noqa: E402
+from twdata import common  # noqa: E402
 from twdata.common import HISTORY, PARTS  # noqa: E402
 
 OUT = PARTS / "capex" / "capex.csv"
@@ -37,7 +38,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=float, default=300)
     ap.add_argument("--codes", default="", help="只抓指定代號（逗號分隔），測試用")
+    ap.add_argument("--delay", type=float, default=3.0, help="每次請求最少間隔秒數（逐家查詢較密集，預設 3 秒）")
     a = ap.parse_args()
+    common.DELAY = a.delay
     t0 = time.time()
     q = pd.read_csv(HISTORY / "quarterly.csv", dtype={"code": str}, usecols=["code", "year", "quarter", "eps"]).dropna()
     latest = tuple(q.sort_values(["year", "quarter"]).iloc[-1][["year", "quarter"]].astype(int))
