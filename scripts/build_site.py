@@ -152,6 +152,64 @@ def forecast_eps(qd: dict, m: dict, Y: int, shares: float, latest_q: tuple):
                            "seasonal_years": nf, "revenue_basis_ratio": r(ratio), "months_published": nm}
 
 
+BAL_FIELDS = ["cl_current", "cl_noncurrent", "inventory", "receivables", "total_liabilities", "total_assets"]
+FLAT = 0.10   # 年增率在 ±10% 以內算持平
+
+
+def trend(cur, prev):
+    """和去年同季比：up／down／flat；缺資料回傳 None。去年為 0、今年大於 0 算 up。"""
+    if cur is None or prev is None:
+        return None
+    if prev == 0:
+        return "up" if cur > 0 else "flat"
+    g = cur / prev - 1
+    return "up" if g > FLAT else "down" if g < -FLAT else "flat"
+
+
+def yoy(cur, prev):
+    return r(cur / prev - 1) if cur is not None and prev not in (None, 0) else None
+
+
+def contract_info(b: dict | None, qd: dict, rev4):
+    """合約負債（預收款）欄位：依重要性 判讀→流動→營收→存貨→可撐月數→金額→非流動。"""
+    if not b:
+        return None
+    k = max(b)
+    prevk = (k[0] - 1, k[1])
+    c, p = b[k], b.get(prevk, {})
+    cur, non = c.get("cl_current"), c.get("cl_noncurrent")
+    listed = cur is not None or non is not None
+    rq, rp = qd.get(k, {}).get("revenue"), qd.get(prevk, {}).get("revenue")
+    t = {"current": trend(cur, p.get("cl_current")), "noncurrent": trend(non, p.get("cl_noncurrent")),
+         "inventory": trend(c.get("inventory"), p.get("inventory")), "revenue": trend(rq, rp)}
+    total_cl = (cur or 0) + (non or 0) if listed else None
+    months = r(cur / (rev4 / 12), 1) if cur is not None and rev4 else None
+    small = bool(listed and rev4 and (total_cl or 0) / rev4 < 0.01)
+    signal = None
+    if listed and not small:
+        tc, tn, ti, tr = t["current"], t["noncurrent"], t["inventory"], t["revenue"]
+        if tc == "up" and ti == "up" and tr in ("flat", "down"):
+            signal = ("warn", "預收款和存貨都大增，營收沒跟上，可能出貨卡關")
+        elif tc == "up" and tr == "up":
+            signal = ("good", "訂單滿手，預收款正在轉成營收")
+        elif tc == "down" and tr == "up":
+            signal = ("info", "預收款轉成營收，正常")
+        elif tc == "down" and tr == "down":
+            signal = ("warn", "新訂單可能變少，要留意")
+        elif tn == "up" and tc in ("flat", None):
+            signal = ("info", "主要是非流動在增加：營收會分好幾年認列，短期業績不會立刻爆發")
+    tl, ta = c.get("total_liabilities"), c.get("total_assets")
+    return {"quarter": f"{k[0]}Q{k[1]}", "listed": listed, "small": small,
+            "signal": {"level": signal[0], "text": signal[1]} if signal else None,
+            "current": r(cur, 0), "current_yoy": yoy(cur, p.get("cl_current")),
+            "revenue_q": r(rq, 0), "revenue_yoy": yoy(rq, rp),
+            "inventory": r(c.get("inventory"), 0), "inventory_yoy": yoy(c.get("inventory"), p.get("inventory")),
+            "receivables": r(c.get("receivables"), 0), "receivables_yoy": yoy(c.get("receivables"), p.get("receivables")),
+            "months_of_revenue": months, "total": r(total_cl, 0),
+            "noncurrent": r(non, 0), "noncurrent_yoy": yoy(non, p.get("cl_noncurrent")), "trend": t,
+            "debt_ratio_ex_cl": r(div(tl - total_cl, ta)) if tl is not None and ta and total_cl is not None else None}
+
+
 def main():
     co = pd.read_csv(HISTORY / "companies.csv", dtype={"code": str, "industry_code": str})
     q = pd.read_csv(HISTORY / "quarterly.csv", dtype={"code": str})
@@ -164,6 +222,14 @@ def main():
         for x in pd.read_csv(cap_path, dtype={"code": str}).itertuples(index=False):
             if ok(x.capex_cum):
                 capex[(x.code, int(x.year), int(x.quarter))] = float(x.capex_cum)
+    bal_path = ROOT / "data" / "parts" / "balance" / "balance.csv"
+    bal = {}
+    if bal_path.exists():   # 逐家資產負債表（千元）：合約負債、存貨、應收帳款；每家取最新一次查詢
+        bd = pd.read_csv(bal_path, dtype={"code": str})
+        bd = bd[bd["status"] == "ok"]
+        for x in bd.itertuples(index=False):
+            v = {k: (float(getattr(x, k)) if ok(getattr(x, k)) else None) for k in BAL_FIELDS}
+            bal.setdefault(x.code, {})[(int(x.year), int(x.quarter))] = v
     # 全年營業／投資現金流：直接用第 4 季累計數（＝年報全年），不必四季單季都齊
     annual_cf = {}
     for f in (ROOT / "data" / "parts" / "cf").glob("*Q4.csv"):
@@ -304,6 +370,9 @@ def main():
                           "cash_conversion": r(div(ocf4, nit4)) if nit4 is not None and nit4 > 0 else None,
                           "debt_ratio": r(div(lv.get("total_liabilities"), lv.get("total_assets"))),
                           "dividend_streak": streak, "dividend_streak_through": streak_through}
+        rec["contract"] = contract_info(bal.get(code), qd, rev4)
+        if rec["contract"] and rec["contract"]["quarter"] == f"{lq[0]}Q{lq[1]}" and rec["contract"].get("debt_ratio_ex_cl") is not None:
+            rec["quality"]["debt_ratio_ex_cl"] = rec["contract"]["debt_ratio_ex_cl"]
         # 可信度低：近 8 季單季淨利率波動大、近 8 季有虧損季、營收年增率波動大、或月營收與財報口徑差距大
         k8 = q_back(*lq, 8)
         margins = [div(qd[k].get("parent_net_income"), qd[k].get("revenue")) for k in k8 if k in qd]

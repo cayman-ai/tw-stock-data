@@ -1,0 +1,39 @@
+name: 資產負債表：合約負債、存貨、應收帳款（逐家，可續跑）
+on:
+  schedule:
+    - cron: "47 */6 * * *"      # 每 6 小時接著抓一批；抓完後每次只快速檢查，新一季財報出來會自動重抓
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tw-stock-data-balance   # 只寫 data/parts/balance，和其他排程分開排隊，推送時會 rebase
+  cancel-in-progress: false
+jobs:
+  balance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -q requests pandas lxml
+      - name: 抓資產負債表（最多 290 分鐘，存檔後結束）
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/fetch_balance.py --minutes 290 2>&1 | tee balance-log.txt
+      - name: 資料存回 main
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add data/parts/balance
+          if ! git diff --cached --quiet; then
+            git -c user.name=tw-stock-data-bot -c user.email=bot@users.noreply.github.com commit -qm "資產負債表更新 run ${{ github.run_id }}"
+            pushed=0
+            for i in 1 2 3 4 5; do
+              if git pull -q --rebase --autostash origin main && git push -q origin HEAD:main; then pushed=1; break; fi
+              sleep $((i*7))
+            done
+            if [ "$pushed" != 1 ]; then echo "::error::推送失敗"; exit 1; fi
+          fi
